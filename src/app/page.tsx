@@ -1,9 +1,15 @@
 "use client"
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { io, Socket } from 'socket.io-client';
 
 interface VideoChatProps {
   serverUrl?: string;
+}
+
+interface MessageEvent {
+  input: string;
+  type?: string;
+  from?: string;
 }
 
 const VideoChat: React.FC<VideoChatProps> = ({ 
@@ -20,62 +26,47 @@ const VideoChat: React.FC<VideoChatProps> = ({
   const peerRef = useRef<RTCPeerConnection | null>(null);
   const remoteSocketRef = useRef<string>('');
 
-  useEffect(() => {
-    // Initialize socket connection
-    const newSocket = io(serverUrl);
-    setSocket(newSocket);
+  const handleSdpReply = useCallback(async ({ sdp, from }: { sdp: RTCSessionDescriptionInit, from: string }) => {
+    if (!peerRef.current) return;
 
-    // Start connection and get participant type
-    newSocket.emit('start', (personType: string) => {
-      setType(personType);
-    });
+    try {
+      // Set remote description 
+      await peerRef.current.setRemoteDescription(new RTCSessionDescription(sdp));
 
-    // Listen for remote socket
-    newSocket.on('remote-socket', (id: string) => {
-      remoteSocketRef.current = id;
+      // if type == p2, create answer
+      if (type === 'p2') {
+        const ans = await peerRef.current.createAnswer();
+        await peerRef.current.setLocalDescription(ans);
+        socket?.emit('sdp:send', { sdp: peerRef.current.localDescription });
+      }
+    } catch (error) {
+      console.error('Error handling SDP reply:', error);
+    }
+  }, [type, socket]);
 
-      // Create peer connection
-      peerRef.current = new RTCPeerConnection();
+  const handleIceCandidate = useCallback(async ({ candidate, from }: { candidate: RTCIceCandidateInit, from: string }) => {
+    if (!peerRef.current || !candidate) return;
 
-      // Setup negotiation
-      peerRef.current.onnegotiationneeded = async () => {
-        await setupWebRTC();
-      };
+    try {
+      await peerRef.current.addIceCandidate(candidate);
+    } catch (error) {
+      console.error('Error adding ICE candidate:', error);
+    }
+  }, []);
 
-      // Send ICE candidates
-      peerRef.current.onicecandidate = (e) => {
-        newSocket.emit('ice:send', { 
-          candidate: e.candidate, 
-          to: remoteSocketRef.current 
-        });
-      };
+  const setupWebRTC = useCallback(async () => {
+    if (type === 'p1' && peerRef.current && socket) {
+      try {
+        const offer = await peerRef.current.createOffer();
+        await peerRef.current.setLocalDescription(offer);
+        socket.emit('sdp:send', { sdp: peerRef.current.localDescription });
+      } catch (error) {
+        console.error('WebRTC setup error:', error);
+      }
+    }
+  }, [type, socket]);
 
-      // Start media capture
-      startMediaCapture();
-    });
-
-    // Listen for room ID
-    newSocket.on('roomid', (id: string) => {
-      setRoomId(id);
-    });
-
-    // Listen for messages
-    newSocket.on('get-message', (input: string) => {
-      setMessages(prev => [...prev, `Stranger: ${input}`]);
-    });
-
-    // Listen for disconnection
-    newSocket.on('disconnected', () => {
-      window.location.href = '/?disconnect';
-    });
-
-    // Cleanup on unmount
-    return () => {
-      newSocket.disconnect();
-    };
-  }, [serverUrl]);
-
-  const startMediaCapture = async () => {
+  const startMediaCapture = useCallback(async () => {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ 
         audio: true, 
@@ -101,15 +92,72 @@ const VideoChat: React.FC<VideoChatProps> = ({
     } catch (ex) {
       console.error('Media capture error:', ex);
     }
-  };
+  }, []);
 
-  const setupWebRTC = async () => {
-    if (type === 'p1' && peerRef.current && socket) {
-      const offer = await peerRef.current.createOffer();
-      await peerRef.current.setLocalDescription(offer);
-      socket.emit('sdp:send', { sdp: peerRef.current.localDescription });
-    }
-  };
+  useEffect(() => {
+    // Initialize socket connection
+    const newSocket = io(serverUrl);
+    setSocket(newSocket);
+
+    // Start connection and get participant type
+    newSocket.emit('start', (personType: string) => {
+      setType(personType);
+    });
+
+    // Listen for remote socket
+    newSocket.on('remote-socket', (id: string) => {
+      remoteSocketRef.current = id;
+
+      // Create peer connection
+      peerRef.current = new RTCPeerConnection();
+
+      // Setup negotiation
+      peerRef.current.onnegotiationneeded = setupWebRTC;
+
+      // Send ICE candidates
+      peerRef.current.onicecandidate = (e) => {
+        newSocket.emit('ice:send', { 
+          candidate: e.candidate, 
+          to: remoteSocketRef.current 
+        });
+      };
+
+      // Start media capture
+      startMediaCapture();
+    });
+
+    // Listen for room ID
+    newSocket.on('roomid', (id: string) => {
+      setRoomId(id);
+    });
+
+    // Listen for messages
+    newSocket.on('get-message', (input: string) => {
+      setMessages(prev => [...prev, `Stranger: ${input}`]);
+    });
+
+    // Listen for SDP
+    newSocket.on('sdp:reply', handleSdpReply);
+
+    // Listen for ICE candidates
+    newSocket.on('ice:reply', handleIceCandidate);
+
+    // Listen for disconnection
+    newSocket.on('disconnected', () => {
+      window.location.href = '/?disconnect';
+    });
+
+    // Cleanup on unmount
+    return () => {
+      newSocket.disconnect();
+    };
+  }, [
+    serverUrl, 
+    setupWebRTC, 
+    startMediaCapture, 
+    handleSdpReply, 
+    handleIceCandidate
+  ]);
 
   const handleSendMessage = () => {
     if (socket && inputMessage) {
