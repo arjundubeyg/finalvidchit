@@ -1,103 +1,172 @@
-import Image from "next/image";
+"use client"
+import React, { useState, useEffect, useRef } from 'react';
+import { io, Socket } from 'socket.io-client';
 
-export default function Home() {
+interface VideoChatProps {
+  serverUrl?: string;
+}
+
+const VideoChat: React.FC<VideoChatProps> = ({ 
+  serverUrl = 'https://server-vid-chat.onrender.com' 
+}) => {
+  const [socket, setSocket] = useState<Socket | null>(null);
+  const [type, setType] = useState<string>('');
+  const [roomId, setRoomId] = useState<string>('');
+  const [messages, setMessages] = useState<string[]>([]);
+  const [inputMessage, setInputMessage] = useState<string>('');
+
+  const myVideoRef = useRef<HTMLVideoElement>(null);
+  const strangerVideoRef = useRef<HTMLVideoElement>(null);
+  const peerRef = useRef<RTCPeerConnection | null>(null);
+  const remoteSocketRef = useRef<string>('');
+
+  useEffect(() => {
+    // Initialize socket connection
+    const newSocket = io(serverUrl);
+    setSocket(newSocket);
+
+    // Start connection and get participant type
+    newSocket.emit('start', (personType: string) => {
+      setType(personType);
+    });
+
+    // Listen for remote socket
+    newSocket.on('remote-socket', (id: string) => {
+      remoteSocketRef.current = id;
+
+      // Create peer connection
+      peerRef.current = new RTCPeerConnection();
+
+      // Setup negotiation
+      peerRef.current.onnegotiationneeded = async () => {
+        await setupWebRTC();
+      };
+
+      // Send ICE candidates
+      peerRef.current.onicecandidate = (e) => {
+        newSocket.emit('ice:send', { 
+          candidate: e.candidate, 
+          to: remoteSocketRef.current 
+        });
+      };
+
+      // Start media capture
+      startMediaCapture();
+    });
+
+    // Listen for room ID
+    newSocket.on('roomid', (id: string) => {
+      setRoomId(id);
+    });
+
+    // Listen for messages
+    newSocket.on('get-message', (input: string) => {
+      setMessages(prev => [...prev, `Stranger: ${input}`]);
+    });
+
+    // Listen for disconnection
+    newSocket.on('disconnected', () => {
+      window.location.href = '/?disconnect';
+    });
+
+    // Cleanup on unmount
+    return () => {
+      newSocket.disconnect();
+    };
+  }, [serverUrl]);
+
+  const startMediaCapture = async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ 
+        audio: true, 
+        video: true 
+      });
+
+      if (myVideoRef.current) {
+        myVideoRef.current.srcObject = stream;
+      }
+
+      if (peerRef.current) {
+        stream.getTracks().forEach(track => {
+          peerRef.current?.addTrack(track, stream);
+        });
+
+        peerRef.current.ontrack = (e) => {
+          if (strangerVideoRef.current) {
+            strangerVideoRef.current.srcObject = e.streams[0];
+            strangerVideoRef.current.play();
+          }
+        };
+      }
+    } catch (ex) {
+      console.error('Media capture error:', ex);
+    }
+  };
+
+  const setupWebRTC = async () => {
+    if (type === 'p1' && peerRef.current && socket) {
+      const offer = await peerRef.current.createOffer();
+      await peerRef.current.setLocalDescription(offer);
+      socket.emit('sdp:send', { sdp: peerRef.current.localDescription });
+    }
+  };
+
+  const handleSendMessage = () => {
+    if (socket && inputMessage) {
+      socket.emit('send-message', inputMessage, type, roomId);
+      setMessages(prev => [...prev, `You: ${inputMessage}`]);
+      setInputMessage('');
+    }
+  };
+
   return (
-    <div className="grid grid-rows-[20px_1fr_20px] items-center justify-items-center min-h-screen p-8 pb-20 gap-16 sm:p-20 font-[family-name:var(--font-geist-sans)]">
-      <main className="flex flex-col gap-[32px] row-start-2 items-center sm:items-start">
-        <Image
-          className="dark:invert"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={180}
-          height={38}
-          priority
-        />
-        <ol className="list-inside list-decimal text-sm/6 text-center sm:text-left font-[family-name:var(--font-geist-mono)]">
-          <li className="mb-2 tracking-[-.01em]">
-            Get started by editing{" "}
-            <code className="bg-black/[.05] dark:bg-white/[.06] px-1 py-0.5 rounded font-[family-name:var(--font-geist-mono)] font-semibold">
-              src/app/page.tsx
-            </code>
-            .
-          </li>
-          <li className="tracking-[-.01em]">
-            Save and see your changes instantly.
-          </li>
-        </ol>
-
-        <div className="flex gap-4 items-center flex-col sm:flex-row">
-          <a
-            className="rounded-full border border-solid border-transparent transition-colors flex items-center justify-center bg-foreground text-background gap-2 hover:bg-[#383838] dark:hover:bg-[#ccc] font-medium text-sm sm:text-base h-10 sm:h-12 px-4 sm:px-5 sm:w-auto"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={20}
-              height={20}
-            />
-            Deploy now
-          </a>
-          <a
-            className="rounded-full border border-solid border-black/[.08] dark:border-white/[.145] transition-colors flex items-center justify-center hover:bg-[#f2f2f2] dark:hover:bg-[#1a1a1a] hover:border-transparent font-medium text-sm sm:text-base h-10 sm:h-12 px-4 sm:px-5 w-full sm:w-auto md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Read our docs
-          </a>
+    <div className="flex flex-col min-h-screen bg-gray-100 p-4">
+      <div className="flex-grow grid grid-cols-1 md:grid-cols-2 gap-4">
+        {/* Video Containers */}
+        <div className="bg-black rounded-lg flex items-center justify-center">
+          <video 
+            ref={myVideoRef} 
+            autoPlay 
+            muted 
+            className="max-w-full max-h-full"
+          />
         </div>
-      </main>
-      <footer className="row-start-3 flex gap-[24px] flex-wrap items-center justify-center">
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="/file.svg"
-            alt="File icon"
-            width={16}
-            height={16}
+        <div className="bg-black rounded-lg flex items-center justify-center">
+          <video 
+            ref={strangerVideoRef} 
+            autoPlay 
+            className="max-w-full max-h-full"
           />
-          Learn
-        </a>
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="/window.svg"
-            alt="Window icon"
-            width={16}
-            height={16}
-          />
-          Examples
-        </a>
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://nextjs.org?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="/globe.svg"
-            alt="Globe icon"
-            width={16}
-            height={16}
-          />
-          Go to nextjs.org →
-        </a>
-      </footer>
+        </div>
+
+        {/* Chat Section */}
+        <div className="col-span-full bg-white rounded-lg shadow-md p-4">
+          <div className="h-64 overflow-y-auto mb-4">
+            {messages.map((msg, index) => (
+              <div key={index} className="py-1">
+                {msg}
+              </div>
+            ))}
+          </div>
+          <div className="flex">
+            <input 
+              type="text" 
+              value={inputMessage}
+              onChange={(e) => setInputMessage(e.target.value)}
+              className="flex-grow p-2 border rounded-l-lg"
+              placeholder="Type a message..."
+            />
+            <button 
+              onClick={handleSendMessage}
+              className="bg-blue-500 text-white px-4 py-2 rounded-r-lg hover:bg-blue-600"
+            >
+              Send
+            </button>
+          </div>
+        </div>
+      </div>
     </div>
   );
-}
+};
+
+export default VideoChat;
