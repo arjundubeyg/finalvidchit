@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect, useRef, useCallback } from "react";
+import React, { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { io, Socket } from "socket.io-client";
 
 const SERVER_URL = "https://server-vid-chat.onrender.com";
@@ -17,14 +17,15 @@ const Page: React.FC = () => {
   const peerRef = useRef<RTCPeerConnection | null>(null);
   const remoteSocketRef = useRef<string>("");
 
+  // Memoize callback functions to prevent unnecessary re-renders
   const handleSdpReply = useCallback(async ({ sdp }: { sdp: RTCSessionDescriptionInit }) => {
-    if (!peerRef.current) return;
+    if (!peerRef.current || !socket) return;
     try {
       await peerRef.current.setRemoteDescription(new RTCSessionDescription(sdp));
       if (type === "p2") {
         const ans = await peerRef.current.createAnswer();
         await peerRef.current.setLocalDescription(ans);
-        socket?.emit("sdp:send", { sdp: peerRef.current.localDescription });
+        socket.emit("sdp:send", { sdp: peerRef.current.localDescription });
       }
     } catch (error) {
       console.error("Error handling SDP reply:", error);
@@ -70,13 +71,13 @@ const Page: React.FC = () => {
     }
   }, []);
 
+  // Use a single useEffect for socket setup with minimal dependencies
   useEffect(() => {
     const newSocket = io(SERVER_URL);
     setSocket(newSocket);
 
-    newSocket.emit("start", (personType: string) => setType(personType));
-
-    newSocket.on("remote-socket", (id: string) => {
+    const handleStart = (personType: string) => setType(personType);
+    const handleRemoteSocket = (id: string) => {
       remoteSocketRef.current = id;
       peerRef.current = new RTCPeerConnection();
       peerRef.current.onnegotiationneeded = setupWebRTC;
@@ -84,9 +85,11 @@ const Page: React.FC = () => {
         newSocket.emit("ice:send", { candidate: e.candidate, to: remoteSocketRef.current });
       };
       startMediaCapture();
-    });
+    };
 
-    newSocket.on("roomid", (id: string) => setRoomId(id));
+    newSocket.emit("start", handleStart);
+    newSocket.on("remote-socket", handleRemoteSocket);
+    newSocket.on("roomid", setRoomId);
     newSocket.on("get-message", (input: string) => setMessages((prev) => [...prev, `Stranger: ${input}`]));
     newSocket.on("sdp:reply", handleSdpReply);
     newSocket.on("ice:reply", handleIceCandidate);
@@ -95,15 +98,15 @@ const Page: React.FC = () => {
     return () => {
       newSocket.disconnect();
     };
-  }, [setupWebRTC, startMediaCapture, handleSdpReply, handleIceCandidate]);
+  }, []); // Empty dependency array to run only once
 
-  const handleSendMessage = () => {
+  const handleSendMessage = useCallback(() => {
     if (socket && inputMessage) {
       socket.emit("send-message", inputMessage, type, roomId);
       setMessages((prev) => [...prev, `You: ${inputMessage}`]);
       setInputMessage("");
     }
-  };
+  }, [socket, inputMessage, type, roomId]);
 
   return (
     <div className="flex flex-col min-h-screen bg-gray-100 p-4">
@@ -133,7 +136,10 @@ const Page: React.FC = () => {
               className="flex-grow p-2 border rounded-l-lg"
               placeholder="Type a message..."
             />
-            <button onClick={handleSendMessage} className="bg-blue-500 text-white px-4 py-2 rounded-r-lg hover:bg-blue-600">
+            <button 
+              onClick={handleSendMessage} 
+              className="bg-blue-500 text-white px-4 py-2 rounded-r-lg hover:bg-blue-600"
+            >
               Send
             </button>
           </div>
